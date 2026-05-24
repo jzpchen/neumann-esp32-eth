@@ -1,0 +1,6 @@
+# Ignore private Wi-Fi credentials
+credentials.h
+
+# Ignore compilation builds (if any are saved locally)
+build/
+out/
