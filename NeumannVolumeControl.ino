@@ -255,19 +255,28 @@ void mdnsDiscoveryTask(void *pvParameters) {
         Serial.printf("[%lu ms] Native mDNS query found 0 speakers or failed (took %lu ms).\n", millis(), millis() - startScan);
       }
       
-      // If mDNS returned nothing, attempt direct TCP reconnection to known history
-      if (activeCount == 0 && knownSpeakerCount > 0) {
-        Serial.printf("[%lu ms] mDNS found 0 speakers. Attempting direct TCP reconnect to %d known speaker(s)...\n", millis(), knownSpeakerCount);
+      // Attempt direct TCP reconnection to any missing known speakers in our history
+      if (knownSpeakerCount > 0) {
         for (int i = 0; i < knownSpeakerCount && activeCount < 10; i++) {
-          uint32_t startTCP = millis();
-          NetworkClient client;
-          if (client.connect(knownSpeakers[i].ip, knownSpeakers[i].port, 300)) { // Fast 300ms timeout
-            client.stop();
-            Serial.printf("[%lu ms] Direct reconnect success: Speaker %s is ONLINE (took %lu ms)\n", millis(), knownSpeakers[i].hostname, millis() - startTCP);
-            activeSpeakers[activeCount] = knownSpeakers[i];
-            activeCount++;
-          } else {
-            Serial.printf("[%lu ms] Direct reconnect failed to %s (timeout/refused after %lu ms)\n", millis(), knownSpeakers[i].hostname, millis() - startTCP);
+          // Check if knownSpeakers[i] is already in activeSpeakers (by IP)
+          bool alreadyFound = false;
+          for (int j = 0; j < activeCount; j++) {
+            if (activeSpeakers[j].ip == knownSpeakers[i].ip) {
+              alreadyFound = true;
+              break;
+            }
+          }
+          
+          if (!alreadyFound) {
+            uint32_t startTCP = millis();
+            NetworkClient client;
+            if (client.connect(knownSpeakers[i].ip, knownSpeakers[i].port, 300)) { // Fast 300ms timeout
+              client.stop();
+              Serial.printf("[%lu ms] Direct reconnect success for missing speaker: %s (%s, took %lu ms)\n", 
+                millis(), knownSpeakers[i].hostname, knownSpeakers[i].ip.toString().c_str(), startTCP);
+              activeSpeakers[activeCount] = knownSpeakers[i];
+              activeCount++;
+            }
           }
         }
       }
@@ -279,24 +288,36 @@ void mdnsDiscoveryTask(void *pvParameters) {
       for (int i = 0; i < activeCount; i++) {
         bool wasCached = false;
         for (int j = 0; j < speakerCount; j++) {
-          if (strcmp(activeSpeakers[i].hostname, discoveredSpeakers[j].hostname) == 0) {
+          if (activeSpeakers[i].ip == discoveredSpeakers[j].ip) {
             wasCached = true;
             break;
           }
         }
         
         if (!wasCached) {
-          Serial.printf("[%lu ms] New speaker connected: %s\n", millis(), activeSpeakers[i].hostname);
+          Serial.printf("[%lu ms] New speaker connected: %s (%s)\n", millis(), activeSpeakers[i].hostname, activeSpeakers[i].ip.toString().c_str());
           if (currentVolume > -999.0) {
+            // Give the speaker's internal stack 500ms to stabilize after physical connection is verified
+            delay(500);
             Serial.printf("[%lu ms] Syncing new speaker %s to current volume level %.1f dB...\n", millis(), activeSpeakers[i].hostname, currentVolume);
-            setSpeakerLevel(activeSpeakers[i], currentVolume);
+            if (setSpeakerLevel(activeSpeakers[i], currentVolume)) {
+              Serial.println("  Volume sync successful.");
+            } else {
+              Serial.println("  Volume sync failed. Retrying in 1 second...");
+              delay(1000);
+              if (setSpeakerLevel(activeSpeakers[i], currentVolume)) {
+                Serial.println("  Volume sync successful on retry.");
+              } else {
+                Serial.println("  Volume sync retry failed.");
+              }
+            }
           }
         }
         
-        // Add to persistent knownSpeakers list if not already there
+        // Add to persistent knownSpeakers list if not already there (by IP)
         bool isKnown = false;
         for (int j = 0; j < knownSpeakerCount; j++) {
-          if (strcmp(knownSpeakers[j].hostname, activeSpeakers[i].hostname) == 0) {
+          if (knownSpeakers[j].ip == activeSpeakers[i].ip) {
             isKnown = true;
             break;
           }
@@ -304,7 +325,7 @@ void mdnsDiscoveryTask(void *pvParameters) {
         if (!isKnown && knownSpeakerCount < 10) {
           knownSpeakers[knownSpeakerCount] = activeSpeakers[i];
           knownSpeakerCount++;
-          Serial.printf("[%lu ms] Added %s to known speakers history.\n", millis(), activeSpeakers[i].hostname);
+          Serial.printf("[%lu ms] Added %s (%s) to known speakers history.\n", millis(), activeSpeakers[i].hostname, activeSpeakers[i].ip.toString().c_str());
         }
       }
       
