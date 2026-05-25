@@ -5,7 +5,6 @@
 #include "mdns.h"
 #include <WebServer.h>
 #include <ArduinoJson.h>
-#include <WiFiUdp.h>
 #include "credentials.h"
 #include "html.h"
 
@@ -15,9 +14,6 @@
 #define CS_PIN 14
 #define IRQ_PIN 10
 #define RST_PIN 9
-
-#define UDP_PORT 45
-#define LOCAL_UDP_PORT 4545
 
 #define MAX_LEVEL 80.0
 #define MIN_LEVEL 0.0
@@ -32,11 +28,12 @@ struct SpeakerInfo {
 // Speaker lists and mutex
 SpeakerInfo discoveredSpeakers[10];
 int speakerCount = 0;
+SpeakerInfo knownSpeakers[10];
+int knownSpeakerCount = 0;
 SemaphoreHandle_t speakerMutex = NULL;
 float currentVolume = -1000.0; // -1000.0 means uninitialized
 
 WebServer server(5000);
-WiFiUDP udp;
 
 SPIClass ethSPI(HSPI);
 
@@ -85,10 +82,7 @@ void setup() {
     ETH.enableIPv6(true);
   }
 
-  // Start UDP listener using IPv6 wildcard to ensure the socket supports IPv6
-  udp.begin(IPAddress(IPv6), LOCAL_UDP_PORT);
-  Serial.print("UDP listening on local port ");
-  Serial.println(LOCAL_UDP_PORT);
+
 
   // Register WebServer routes
   server.on("/api/speakers", HTTP_GET, handleGetSpeakers);
@@ -242,7 +236,7 @@ void mdnsDiscoveryTask(void *pvParameters) {
           uint32_t startTCP = millis();
           NetworkClient client;
           Serial.printf("  [%lu ms] Verifying connectivity to speaker %s (%s:%d)...\n", millis(), hostName, ip.toString().c_str(), port);
-          if (client.connect(ip, port, 500)) {
+          if (client.connect(ip, port, 400)) {
             client.stop();
             Serial.printf("  [%lu ms] Speaker %s ONLINE (TCP connect took %lu ms).\n", millis(), hostName, millis() - startTCP);
             
@@ -259,6 +253,23 @@ void mdnsDiscoveryTask(void *pvParameters) {
         mdns_query_results_free(results);
       } else {
         Serial.printf("[%lu ms] Native mDNS query found 0 speakers or failed (took %lu ms).\n", millis(), millis() - startScan);
+      }
+      
+      // If mDNS returned nothing, attempt direct TCP reconnection to known history
+      if (activeCount == 0 && knownSpeakerCount > 0) {
+        Serial.printf("[%lu ms] mDNS found 0 speakers. Attempting direct TCP reconnect to %d known speaker(s)...\n", millis(), knownSpeakerCount);
+        for (int i = 0; i < knownSpeakerCount && activeCount < 10; i++) {
+          uint32_t startTCP = millis();
+          NetworkClient client;
+          if (client.connect(knownSpeakers[i].ip, knownSpeakers[i].port, 300)) { // Fast 300ms timeout
+            client.stop();
+            Serial.printf("[%lu ms] Direct reconnect success: Speaker %s is ONLINE (took %lu ms)\n", millis(), knownSpeakers[i].hostname, millis() - startTCP);
+            activeSpeakers[activeCount] = knownSpeakers[i];
+            activeCount++;
+          } else {
+            Serial.printf("[%lu ms] Direct reconnect failed to %s (timeout/refused after %lu ms)\n", millis(), knownSpeakers[i].hostname, millis() - startTCP);
+          }
+        }
       }
       
       // Update cache and perform synchronization/initialization logic
@@ -280,6 +291,20 @@ void mdnsDiscoveryTask(void *pvParameters) {
             Serial.printf("[%lu ms] Syncing new speaker %s to current volume level %.1f dB...\n", millis(), activeSpeakers[i].hostname, currentVolume);
             setSpeakerLevel(activeSpeakers[i], currentVolume);
           }
+        }
+        
+        // Add to persistent knownSpeakers list if not already there
+        bool isKnown = false;
+        for (int j = 0; j < knownSpeakerCount; j++) {
+          if (strcmp(knownSpeakers[j].hostname, activeSpeakers[i].hostname) == 0) {
+            isKnown = true;
+            break;
+          }
+        }
+        if (!isKnown && knownSpeakerCount < 10) {
+          knownSpeakers[knownSpeakerCount] = activeSpeakers[i];
+          knownSpeakerCount++;
+          Serial.printf("[%lu ms] Added %s to known speakers history.\n", millis(), activeSpeakers[i].hostname);
         }
       }
       
