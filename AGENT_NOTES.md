@@ -49,5 +49,6 @@ arduino-cli upload -p <port> --fqbn esp32:esp32:esp32s3 .
 ### Dual-Interface Network Configuration
 * **Wi-Fi**: Connects to the home local network. Read credentials from `credentials.h` (configured for SSID `rose`). Runs the WebServer on port `5000`.
 * **Ethernet**: Configured with a static IPv4 link-local IP `169.254.1.1` (no gateway) to communicate directly with the Neumann monitors connected to the same switch.
-* **mDNS Speaker Discovery**: A background FreeRTOS task runs `MDNS.queryService("ssc", "tcp")` every 15 seconds to query the network for Sennheiser/Neumann devices (`_ssc._tcp`). The discovered IPv6 addresses are cached safely behind a mutex.
-* **SSC UDP Client**: Queries (`{"audio":{"out":{"level":null}}}`) and commands (`{"audio":{"out":{"level":60.0}}}`) are transmitted to the speakers' IPv6 link-local addresses on UDP port `45` using `WiFiUDP` (`NetworkUDP`). Responses are received and parsed using `ArduinoJson`.
+* **mDNS Speaker Discovery**: A background FreeRTOS task runs native ESP-IDF mDNS PTR queries (`mdns_query_ptr("_ssc", "_tcp", ...)`) to search for Sennheiser/Neumann devices. Discovered IP addresses and hostnames are verified and cached behind a mutex.
+* **SSC TCP Client**: Queries (`{"audio":{"out":{"level":null}}}`) and commands (`{"audio":{"out":{"level":60.0}}}`) are transmitted directly to the speakers' IP addresses on TCP port `45` using `NetworkClient`. Responses are received, validated, and parsed using `ArduinoJson`.
+* **Optimistic Direct Polling**: If mDNS returns 0 devices, the controller uses a fast direct TCP handshake poll on port 45 to the static link-local IPv6 addresses of known speakers to minimize power-on detection latency.
