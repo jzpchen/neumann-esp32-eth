@@ -171,70 +171,94 @@ IPAddress queryHostV6(const char *host, uint32_t timeout = 2000) {
 // Background FreeRTOS task for scanning speakers
 void mdnsDiscoveryTask(void *pvParameters) {
   while (true) {
+    uint32_t startScan = millis();
     if (ETH.linkUp()) {
-      Serial.println("Scanning network for Neumann monitors (_ssc._tcp)...");
-      int n = MDNS.queryService("ssc", "tcp");
+      Serial.printf("[%lu ms] Scanning network for Neumann monitors (_ssc._tcp) using native mDNS PTR...\n", millis());
+      
+      mdns_result_t *results = NULL;
+      // Query PTR with a timeout of 800ms (more than enough for a local network link)
+      esp_err_t err = mdns_query_ptr("ssc", "tcp", 800, 10, &results);
       
       // Temporary cache to build the new list of online speakers
       SpeakerInfo activeSpeakers[10];
       int activeCount = 0;
       
-      if (n > 0) {
-        Serial.printf("mDNS discovered %d service record(s). Verifying connectivity...\n", n);
+      if (err == ESP_OK && results != NULL) {
+        // Count results
+        int n = 0;
+        mdns_result_t *temp = results;
+        while (temp) {
+          n++;
+          temp = temp->next;
+        }
+        Serial.printf("[%lu ms] Native mDNS returned %d service record(s) (took %lu ms)\n", millis(), n, millis() - startScan);
         
-        for (int i = 0; i < n && activeCount < 10; i++) {
+        mdns_result_t *r = results;
+        for (int i = 0; r != NULL && activeCount < 10; i++, r = r->next) {
+          uint32_t startRes = millis();
           IPAddress ip;
-          IPAddress ipv4 = MDNS.address(i);
-          if (ipv4 != INADDR_NONE && ipv4 != IPAddress(0,0,0,0)) {
-            ip = ipv4;
-          } else {
-            IPAddress addr = MDNS.addressV6(i);
-            if (addr.type() == IPv6 && addr != IN6ADDR_ANY) {
-              uint8_t ipBytes[16];
-              for (int b = 0; b < 16; b++) ipBytes[b] = addr[b];
-              ip = IPAddress(IPv6, ipBytes, ETH.impl_index());
-            } else {
-              String host = MDNS.hostname(i);
-              if (host.length() > 0) {
-                IPAddress ip4 = MDNS.queryHost(host.c_str(), 1000);
+          
+          // Try to extract IP from the results' address linked list directly
+          mdns_ip_addr_t *curr_addr = r->addr;
+          while (curr_addr != NULL) {
+            if (curr_addr->addr.type == MDNS_IP_PROTOCOL_V6) {
+              ip = IPAddress(IPv6, (const uint8_t *)curr_addr->addr.u_addr.ip6.addr, ETH.impl_index());
+              break; // Prioritize IPv6 link-local
+            } else if (curr_addr->addr.type == MDNS_IP_PROTOCOL_V4 && ip.type() != IPv6) {
+              ip = IPAddress(curr_addr->addr.u_addr.ip4.addr);
+            }
+            curr_addr = curr_addr->next;
+          }
+          
+          // If IP was not in the record, resolve hostname via queries
+          if ((ip.type() == IPv6 && ip == IN6ADDR_ANY) || (ip.type() == IPv4 && ip == IPAddress(0,0,0,0))) {
+            if (r->hostname != NULL && strlen(r->hostname) > 0) {
+              Serial.printf("[%lu ms] IP not in PTR records. Resolving hostname: %s.local...\n", millis(), r->hostname);
+              IPAddress ip6 = queryHostV6(r->hostname, 500);
+              if (ip6.type() == IPv6 && ip6 != IN6ADDR_ANY) {
+                ip = ip6;
+              } else {
+                Serial.printf("[%lu ms] IPv6 query failed (took %lu ms). Trying IPv4 fallback...\n", millis(), millis() - startRes);
+                IPAddress ip4 = MDNS.queryHost(r->hostname, 250);
                 if (ip4 != INADDR_NONE && ip4 != IPAddress(0,0,0,0)) {
                   ip = ip4;
-                } else {
-                  IPAddress ip6 = queryHostV6(host.c_str(), 1500);
-                  if (ip6.type() == IPv6 && ip6 != IN6ADDR_ANY) {
-                    ip = ip6;
-                  }
                 }
               }
             }
           }
           
-          uint16_t port = MDNS.port(i);
-          String hostStr = MDNS.hostname(i);
+          uint16_t port = r->port;
+          const char *hostName = r->hostname ? r->hostname : "";
+          
+          Serial.printf("[%lu ms] Resolution for %s took %lu ms. Resolved IP: %s\n", 
+            millis(), hostName, millis() - startRes, ip.toString().c_str());
           
           if ((ip.type() == IPv6 && ip == IN6ADDR_ANY) || (ip.type() == IPv4 && ip == IPAddress(0,0,0,0))) {
-            Serial.printf("  Skipping service record %d: unresolved IP.\n", i + 1);
+            Serial.printf("  [%lu ms] Skipping service record %d: unresolved IP.\n", millis(), i + 1);
             continue;
           }
           
           // Verify TCP connectivity to port 45
+          uint32_t startTCP = millis();
           NetworkClient client;
-          Serial.printf("  Verifying connectivity to speaker %s (%s:%d)...\n", hostStr.c_str(), ip.toString().c_str(), port);
+          Serial.printf("  [%lu ms] Verifying connectivity to speaker %s (%s:%d)...\n", millis(), hostName, ip.toString().c_str(), port);
           if (client.connect(ip, port, 500)) {
             client.stop();
-            Serial.printf("  Speaker %s is ONLINE.\n", hostStr.c_str());
+            Serial.printf("  [%lu ms] Speaker %s ONLINE (TCP connect took %lu ms).\n", millis(), hostName, millis() - startTCP);
             
             activeSpeakers[activeCount].ip = ip;
             activeSpeakers[activeCount].port = port;
-            strncpy(activeSpeakers[activeCount].hostname, hostStr.c_str(), sizeof(activeSpeakers[activeCount].hostname) - 1);
+            strncpy(activeSpeakers[activeCount].hostname, hostName, sizeof(activeSpeakers[activeCount].hostname) - 1);
             activeSpeakers[activeCount].hostname[sizeof(activeSpeakers[activeCount].hostname) - 1] = '\0';
             activeCount++;
           } else {
-            Serial.printf("  Speaker %s is OFFLINE (TCP connection failed).\n", hostStr.c_str());
+            Serial.printf("  [%lu ms] Speaker %s OFFLINE (TCP connection failed after %lu ms).\n", millis(), hostName, millis() - startTCP);
           }
         }
+        
+        mdns_query_results_free(results);
       } else {
-        Serial.println("No speakers found during mDNS scan.");
+        Serial.printf("[%lu ms] Native mDNS query found 0 speakers or failed (took %lu ms).\n", millis(), millis() - startScan);
       }
       
       // Update cache and perform synchronization/initialization logic
@@ -251,9 +275,9 @@ void mdnsDiscoveryTask(void *pvParameters) {
         }
         
         if (!wasCached) {
-          Serial.printf("New speaker connected: %s\n", activeSpeakers[i].hostname);
+          Serial.printf("[%lu ms] New speaker connected: %s\n", millis(), activeSpeakers[i].hostname);
           if (currentVolume > -999.0) {
-            Serial.printf("Syncing new speaker %s to current volume level %.1f dB...\n", activeSpeakers[i].hostname, currentVolume);
+            Serial.printf("[%lu ms] Syncing new speaker %s to current volume level %.1f dB...\n", millis(), activeSpeakers[i].hostname, currentVolume);
             setSpeakerLevel(activeSpeakers[i], currentVolume);
           }
         }
@@ -267,27 +291,27 @@ void mdnsDiscoveryTask(void *pvParameters) {
       
       // If volume is uninitialized and we have speakers, fetch level to initialize
       if (currentVolume < -999.0 && speakerCount > 0) {
-        Serial.println("Initializing system volume level from first discovered speaker...");
+        Serial.printf("[%lu ms] Initializing system volume level from first discovered speaker...\n", millis());
         float val = getSpeakerLevel(discoveredSpeakers[0]);
         if (val > -999.0) {
           currentVolume = val;
-          Serial.printf("System volume level initialized to: %.1f dB\n", currentVolume);
+          Serial.printf("[%lu ms] System volume level initialized to: %.1f dB\n", millis(), currentVolume);
         } else {
-          Serial.println("Failed to read volume from speaker during initialization.");
+          Serial.printf("[%lu ms] Failed to read volume from speaker during initialization.\n", millis());
         }
       }
       
       xSemaphoreGive(speakerMutex);
       
     } else {
-      Serial.println("Ethernet link down, skipping mDNS scan.");
+      Serial.printf("[%lu ms] Ethernet link down, skipping mDNS scan.\n", millis());
       xSemaphoreTake(speakerMutex, portMAX_DELAY);
       speakerCount = 0;
       xSemaphoreGive(speakerMutex);
     }
     
-    // Wait 5 seconds before scanning again (faster scan to detect state changes quickly)
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    // Wait 3 seconds before scanning again (faster scan to detect state changes quickly)
+    vTaskDelay(pdMS_TO_TICKS(3000));
   }
 }
 
