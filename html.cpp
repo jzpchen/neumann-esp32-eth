@@ -458,9 +458,49 @@ const char HTML_CONTENT[] = R"rawliteral(
             });
         });
 
-        // Poll API every 3 seconds
-        setInterval(fetchState, 3000);
-        // Initial load
+        let pollTimer = null;
+
+        async function fetchState() {
+            try {
+                // Fetch speakers list
+                const spRes = await fetch('/api/speakers');
+                const spData = await spRes.json();
+                
+                // Fetch current volume level
+                const lvlRes = await fetch('/api/level');
+                
+                if (lvlRes.status === 503) {
+                    showOverlay("offline", "Monitors Offline", "Ensure Neumann monitors are powered on and connected to the Ethernet port.");
+                    updateSpeakerUI(spData.speakers || []);
+                    setNextPoll(1000); // Poll faster (1s) when offline
+                    return;
+                }
+                
+                if (!lvlRes.ok) throw new Error("Failed to fetch level");
+                
+                const lvlData = await lvlRes.json();
+                
+                hideOverlay();
+                updateSpeakerUI(spData.speakers || []);
+                
+                if (!isDragging) {
+                    volVal.innerText = lvlData.level.toFixed(1);
+                    volSlider.value = lvlData.level;
+                }
+                setNextPoll(3000); // Standard poll (3s) when online
+            } catch (err) {
+                showOverlay("error", "Controller Unreachable", "Unable to communicate with the ESP32 volume controller. Retrying...");
+                console.error(err);
+                setNextPoll(2000); // Moderate poll (2s) on error
+            }
+        }
+
+        function setNextPoll(delay) {
+            if (pollTimer) clearTimeout(pollTimer);
+            pollTimer = setTimeout(fetchState, delay);
+        }
+
+        // Initial load starts the cycle
         fetchState();
     </script>
 </body>

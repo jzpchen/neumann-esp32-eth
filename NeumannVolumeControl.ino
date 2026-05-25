@@ -286,8 +286,8 @@ void mdnsDiscoveryTask(void *pvParameters) {
       xSemaphoreGive(speakerMutex);
     }
     
-    // Wait 10 seconds before scanning again (faster scan to detect state changes quickly)
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    // Wait 5 seconds before scanning again (faster scan to detect state changes quickly)
+    vTaskDelay(pdMS_TO_TICKS(5000));
   }
 }
 
