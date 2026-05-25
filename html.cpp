@@ -403,6 +403,7 @@ const char HTML_CONTENT[] = R"rawliteral(
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ level })
                 });
+                if (!res.ok) throw new Error(`HTTP error ${res.status}`);
                 const data = await res.json();
                 if (!isDragging && isQuiet()) {
                     volVal.innerText = data.level.toFixed(1);

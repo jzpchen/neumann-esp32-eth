@@ -486,7 +486,7 @@ float getSpeakerLevel(const SpeakerInfo &speaker) {
   
   Serial.printf("Connecting to speaker via TCP %s:%d...\n", speaker.ip.toString().c_str(), speaker.port);
   
-  if (!client.connect(speaker.ip, speaker.port, 300)) { // 300ms connection timeout
+  if (!client.connect(speaker.ip, speaker.port, 1000)) { // 1000ms connection timeout
     Serial.println("TCP connection to speaker failed.");
     return -1000.0;
   }
@@ -499,20 +499,20 @@ float getSpeakerLevel(const SpeakerInfo &speaker) {
   // Await response
   unsigned long start = millis();
   String response = "";
-  while (client.connected() && millis() - start < 150) { // 150ms read timeout
+  while (client.connected() && millis() - start < 1000) { // 1000ms read timeout
     while (client.available()) {
       char c = client.read();
       response += c;
     }
     // If we have a non-empty response, check if we received the closing brace
     if (response.length() > 0 && response.indexOf('}') != -1) {
-      delay(5); // small delay to ensure buffer is completely flushed
+      delay(10); // small delay to ensure buffer is completely flushed
       while (client.available()) {
         response += (char)client.read();
       }
       break;
     }
-    delay(5);
+    delay(10);
   }
   
   client.stop();
@@ -548,7 +548,7 @@ bool setSpeakerLevel(const SpeakerInfo &speaker, float level) {
   
   Serial.printf("Connecting to speaker via TCP %s:%d to set volume...\n", speaker.ip.toString().c_str(), speaker.port);
   
-  if (!client.connect(speaker.ip, speaker.port, 200)) { // 200ms connection timeout
+  if (!client.connect(speaker.ip, speaker.port, 1000)) { // 1000ms connection timeout
     Serial.println("TCP connection to speaker failed.");
     return false;
   }
@@ -562,14 +562,14 @@ bool setSpeakerLevel(const SpeakerInfo &speaker, float level) {
   // Await response (ack)
   unsigned long start = millis();
   String response = "";
-  while (client.connected() && millis() - start < 50) { // 50ms read timeout
+  while (client.connected() && millis() - start < 500) { // 500ms read timeout
     while (client.available()) {
       response += (char)client.read();
     }
     if (response.length() > 0 && response.indexOf('}') != -1) {
       break;
     }
-    delay(5);
+    delay(10);
   }
   
   client.stop();
