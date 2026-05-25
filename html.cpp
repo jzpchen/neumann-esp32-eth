@@ -231,7 +231,7 @@ const char HTML_CONTENT[] = R"rawliteral(
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(8, 12, 20, 0.93);
+            background: rgba(8, 12, 20, 0.95);
             border-radius: 24px;
             display: flex;
             flex-direction: column;
@@ -239,29 +239,51 @@ const char HTML_CONTENT[] = R"rawliteral(
             justify-content: center;
             opacity: 0;
             pointer-events: none;
-            transition: opacity 0.3s ease;
+            transition: opacity 0.4s ease;
             z-index: 10;
             padding: 32px;
             text-align: center;
         }
         
-        .container.error-active .error-overlay {
+        .container.overlay-active .error-overlay {
             opacity: 1;
             pointer-events: auto;
         }
         
         .error-title {
-            font-size: 1.25rem;
+            font-size: 1.3rem;
             font-weight: 700;
             margin-bottom: 8px;
+            transition: color 0.3s ease;
+        }
+        
+        .container.state-connecting .error-title {
+            color: #a5b4fc;
+        }
+        .container.state-connecting .spinner {
+            display: block;
+            border-top-color: var(--accent-primary);
+        }
+        
+        .container.state-offline .error-title {
+            color: var(--text-muted);
+        }
+        .container.state-offline .spinner {
+            display: none;
+        }
+        
+        .container.state-error .error-title {
             color: #ef4444;
+        }
+        .container.state-error .spinner {
+            display: block;
+            border-top-color: #ef4444;
         }
         
         .spinner {
             width: 40px;
             height: 40px;
             border: 4px solid rgba(255, 255, 255, 0.1);
-            border-top-color: var(--accent-primary);
             border-radius: 50%;
             animation: spin 1s infinite linear;
             margin-bottom: 16px;
@@ -274,11 +296,11 @@ const char HTML_CONTENT[] = R"rawliteral(
     </style>
 </head>
 <body>
-    <div class="container" id="container">
+    <div class="container overlay-active state-connecting" id="container">
         <div class="error-overlay" id="errorOverlay">
             <div class="spinner"></div>
-            <div class="error-title" id="errorTitle">Connecting to Speakers</div>
-            <p style="color: var(--text-muted); font-size: 0.85rem;" id="errorDesc">Please wait while the system discovers Neumann monitors on the network...</p>
+            <div class="error-title" id="errorTitle">Scanning Network</div>
+            <p style="color: var(--text-muted); font-size: 0.85rem;" id="errorDesc">Searching for Neumann monitors on the link-local network...</p>
         </div>
         
         <header>
@@ -329,6 +351,18 @@ const char HTML_CONTENT[] = R"rawliteral(
         let updateTimeout = null;
         let isDragging = false;
 
+        function showOverlay(state, title, desc) {
+            container.className = `container overlay-active state-${state}`;
+            errorTitle.innerText = title;
+            document.getElementById('errorDesc').innerText = desc;
+            volSlider.disabled = true;
+        }
+
+        function hideOverlay() {
+            container.className = 'container';
+            volSlider.disabled = false;
+        }
+
         async function fetchState() {
             try {
                 // Fetch speakers list
@@ -339,7 +373,7 @@ const char HTML_CONTENT[] = R"rawliteral(
                 const lvlRes = await fetch('/api/level');
                 
                 if (lvlRes.status === 503) {
-                    showError("Speakers Disconnected", "Ensure Neumann monitors are powered on and connected to the Ethernet port.");
+                    showOverlay("offline", "Monitors Offline", "Ensure Neumann monitors are powered on and connected to the Ethernet port.");
                     updateSpeakerUI(spData.speakers || []);
                     return;
                 }
@@ -348,23 +382,22 @@ const char HTML_CONTENT[] = R"rawliteral(
                 
                 const lvlData = await lvlRes.json();
                 
-                hideError();
+                hideOverlay();
                 updateSpeakerUI(spData.speakers || []);
                 
                 if (!isDragging) {
                     volVal.innerText = lvlData.level.toFixed(1);
                     volSlider.value = lvlData.level;
-                    volSlider.disabled = false;
                 }
             } catch (err) {
-                showError("System Error", "Unable to communicate with the ESP32 volume controller. Retrying...");
+                showOverlay("error", "Controller Unreachable", "Unable to communicate with the ESP32 volume controller. Retrying...");
                 console.error(err);
             }
         }
 
         function updateSpeakerUI(speakers) {
             if (speakers.length > 0) {
-                statusDot.classList.add('online');
+                statusDot.className = 'status-dot online';
                 statusText.innerText = `CONNECTED (${speakers.length})`;
                 speakerList.innerHTML = speakers.map((s, idx) => `
                     <li class="speaker-item">
@@ -373,22 +406,10 @@ const char HTML_CONTENT[] = R"rawliteral(
                     </li>
                 `).join('');
             } else {
-                statusDot.classList.remove('online');
+                statusDot.className = 'status-dot';
                 statusText.innerText = "OFFLINE";
                 speakerList.innerHTML = '<li style="text-align: center; padding: 10px 0;">No discovered speakers</li>';
-                showError("No Speakers Found", "Scanning the Ethernet network for Neumann monitors...");
             }
-        }
-
-        function showError(title, desc) {
-            errorTitle.innerText = title;
-            document.getElementById('errorDesc').innerText = desc;
-            container.classList.add('error-active');
-            volSlider.disabled = true;
-        }
-
-        function hideError() {
-            container.classList.remove('error-active');
         }
 
         async function setVolume(level) {

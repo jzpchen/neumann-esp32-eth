@@ -359,7 +359,7 @@ void handleGetLevel() {
 
   float level = getSpeakerLevel(firstSpeaker);
   if (level < -999.0) { // Sentinel for error
-    server.send(500, "application/json", "{\"error\":\"failed to read level\"}");
+    server.send(503, "application/json", "{\"error\":\"failed to read level\"}");
     return;
   }
 
@@ -427,7 +427,7 @@ void handleSetLevel() {
   }
 
   if (!success) {
-    server.send(500, "application/json", "{\"error\":\"failed to set level\"}");
+    server.send(503, "application/json", "{\"error\":\"failed to set level\"}");
     return;
   }
 
