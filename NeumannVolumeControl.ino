@@ -395,27 +395,13 @@ void handleGetSpeakers() {
 void handleGetLevel() {
   xSemaphoreTake(speakerMutex, portMAX_DELAY);
   int count = speakerCount;
-  SpeakerInfo firstSpeaker;
-  if (count > 0) {
-    firstSpeaker = discoveredSpeakers[0];
-  }
+  float level = currentVolume;
   xSemaphoreGive(speakerMutex);
 
-  if (count == 0) {
+  if (count == 0 || level < -999.0) {
     server.send(503, "application/json", "{\"error\":\"speakers not connected\"}");
     return;
   }
-
-  float level = getSpeakerLevel(firstSpeaker);
-  if (level < -999.0) { // Sentinel for error
-    server.send(503, "application/json", "{\"error\":\"failed to read level\"}");
-    return;
-  }
-
-  // Update currentVolume on successful query
-  xSemaphoreTake(speakerMutex, portMAX_DELAY);
-  currentVolume = level;
-  xSemaphoreGive(speakerMutex);
 
   JsonDocument doc;
   doc["level"] = level;
@@ -500,7 +486,7 @@ float getSpeakerLevel(const SpeakerInfo &speaker) {
   
   Serial.printf("Connecting to speaker via TCP %s:%d...\n", speaker.ip.toString().c_str(), speaker.port);
   
-  if (!client.connect(speaker.ip, speaker.port, 1000)) {
+  if (!client.connect(speaker.ip, speaker.port, 300)) { // 300ms connection timeout
     Serial.println("TCP connection to speaker failed.");
     return -1000.0;
   }
@@ -513,20 +499,20 @@ float getSpeakerLevel(const SpeakerInfo &speaker) {
   // Await response
   unsigned long start = millis();
   String response = "";
-  while (client.connected() && millis() - start < 1000) {
+  while (client.connected() && millis() - start < 150) { // 150ms read timeout
     while (client.available()) {
       char c = client.read();
       response += c;
     }
     // If we have a non-empty response, check if we received the closing brace
     if (response.length() > 0 && response.indexOf('}') != -1) {
-      delay(10); // small delay to ensure buffer is completely flushed
+      delay(5); // small delay to ensure buffer is completely flushed
       while (client.available()) {
         response += (char)client.read();
       }
       break;
     }
-    delay(10);
+    delay(5);
   }
   
   client.stop();
@@ -562,7 +548,7 @@ bool setSpeakerLevel(const SpeakerInfo &speaker, float level) {
   
   Serial.printf("Connecting to speaker via TCP %s:%d to set volume...\n", speaker.ip.toString().c_str(), speaker.port);
   
-  if (!client.connect(speaker.ip, speaker.port, 1000)) {
+  if (!client.connect(speaker.ip, speaker.port, 200)) { // 200ms connection timeout
     Serial.println("TCP connection to speaker failed.");
     return false;
   }
@@ -576,14 +562,14 @@ bool setSpeakerLevel(const SpeakerInfo &speaker, float level) {
   // Await response (ack)
   unsigned long start = millis();
   String response = "";
-  while (client.connected() && millis() - start < 500) {
+  while (client.connected() && millis() - start < 50) { // 50ms read timeout
     while (client.available()) {
       response += (char)client.read();
     }
     if (response.length() > 0 && response.indexOf('}') != -1) {
       break;
     }
-    delay(10);
+    delay(5);
   }
   
   client.stop();

@@ -350,6 +350,17 @@ const char HTML_CONTENT[] = R"rawliteral(
         
         let updateTimeout = null;
         let isDragging = false;
+        let lastInteractionTime = 0;
+        let isSending = false;
+        let pendingVolume = null;
+
+        function registerInteraction() {
+            lastInteractionTime = Date.now();
+        }
+
+        function isQuiet() {
+            return (Date.now() - lastInteractionTime) > 1500; // 1.5s quiet period
+        }
 
         function showOverlay(state, title, desc) {
             container.className = `container overlay-active state-${state}`;
@@ -361,38 +372,6 @@ const char HTML_CONTENT[] = R"rawliteral(
         function hideOverlay() {
             container.className = 'container';
             volSlider.disabled = false;
-        }
-
-        async function fetchState() {
-            try {
-                // Fetch speakers list
-                const spRes = await fetch('/api/speakers');
-                const spData = await spRes.json();
-                
-                // Fetch current volume level
-                const lvlRes = await fetch('/api/level');
-                
-                if (lvlRes.status === 503) {
-                    showOverlay("offline", "Monitors Offline", "Ensure Neumann monitors are powered on and connected to the Ethernet port.");
-                    updateSpeakerUI(spData.speakers || []);
-                    return;
-                }
-                
-                if (!lvlRes.ok) throw new Error("Failed to fetch level");
-                
-                const lvlData = await lvlRes.json();
-                
-                hideOverlay();
-                updateSpeakerUI(spData.speakers || []);
-                
-                if (!isDragging) {
-                    volVal.innerText = lvlData.level.toFixed(1);
-                    volSlider.value = lvlData.level;
-                }
-            } catch (err) {
-                showOverlay("error", "Controller Unreachable", "Unable to communicate with the ESP32 volume controller. Retrying...");
-                console.error(err);
-            }
         }
 
         function updateSpeakerUI(speakers) {
@@ -413,6 +392,11 @@ const char HTML_CONTENT[] = R"rawliteral(
         }
 
         async function setVolume(level) {
+            if (isSending) {
+                pendingVolume = level;
+                return;
+            }
+            isSending = true;
             try {
                 const res = await fetch('/api/level', {
                     method: 'POST',
@@ -420,32 +404,42 @@ const char HTML_CONTENT[] = R"rawliteral(
                     body: JSON.stringify({ level })
                 });
                 const data = await res.json();
-                volVal.innerText = data.level.toFixed(1);
-                if (!isDragging) {
+                if (!isDragging && isQuiet()) {
+                    volVal.innerText = data.level.toFixed(1);
                     volSlider.value = data.level;
                 }
             } catch (err) {
                 console.error("Error setting volume:", err);
+            } finally {
+                isSending = false;
+                if (pendingVolume !== null) {
+                    const nextLevel = pendingVolume;
+                    pendingVolume = null;
+                    await setVolume(nextLevel);
+                }
             }
         }
 
         volSlider.addEventListener('input', (e) => {
             isDragging = true;
+            registerInteraction();
             volVal.innerText = parseFloat(e.target.value).toFixed(1);
             
             // Debounce API calls while sliding
             if (updateTimeout) clearTimeout(updateTimeout);
             updateTimeout = setTimeout(() => {
                 setVolume(parseFloat(e.target.value));
-            }, 50);
+            }, 80);
         });
 
         volSlider.addEventListener('change', (e) => {
             isDragging = false;
+            registerInteraction();
             setVolume(parseFloat(e.target.value));
         });
 
         function setVolumePreset(level) {
+            registerInteraction();
             volSlider.value = level;
             volVal.innerText = level.toFixed(1);
             setVolume(level);
@@ -483,7 +477,7 @@ const char HTML_CONTENT[] = R"rawliteral(
                 hideOverlay();
                 updateSpeakerUI(spData.speakers || []);
                 
-                if (!isDragging) {
+                if (!isDragging && isQuiet()) {
                     volVal.innerText = lvlData.level.toFixed(1);
                     volSlider.value = lvlData.level;
                 }
