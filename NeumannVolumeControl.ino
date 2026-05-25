@@ -177,7 +177,7 @@ void mdnsDiscoveryTask(void *pvParameters) {
       
       mdns_result_t *results = NULL;
       // Query PTR with a timeout of 800ms (more than enough for a local network link)
-      esp_err_t err = mdns_query_ptr("ssc", "tcp", 800, 10, &results);
+      esp_err_t err = mdns_query_ptr("_ssc", "_tcp", 800, 10, &results);
       
       // Temporary cache to build the new list of online speakers
       SpeakerInfo activeSpeakers[10];
