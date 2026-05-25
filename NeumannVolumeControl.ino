@@ -33,6 +33,7 @@ struct SpeakerInfo {
 SpeakerInfo discoveredSpeakers[10];
 int speakerCount = 0;
 SemaphoreHandle_t speakerMutex = NULL;
+float currentVolume = -1000.0; // -1000.0 means uninitialized
 
 WebServer server(5000);
 WiFiUDP udp;
@@ -173,65 +174,111 @@ void mdnsDiscoveryTask(void *pvParameters) {
     if (ETH.linkUp()) {
       Serial.println("Scanning network for Neumann monitors (_ssc._tcp)...");
       int n = MDNS.queryService("ssc", "tcp");
+      
+      // Temporary cache to build the new list of online speakers
+      SpeakerInfo activeSpeakers[10];
+      int activeCount = 0;
+      
       if (n > 0) {
-        Serial.printf("mDNS discovered %d speaker(s):\n", n);
+        Serial.printf("mDNS discovered %d service record(s). Verifying connectivity...\n", n);
         
-        xSemaphoreTake(speakerMutex, portMAX_DELAY);
-        speakerCount = 0;
-        for (int i = 0; i < n && i < 10; i++) {
+        for (int i = 0; i < n && activeCount < 10; i++) {
+          IPAddress ip;
           IPAddress ipv4 = MDNS.address(i);
           if (ipv4 != INADDR_NONE && ipv4 != IPAddress(0,0,0,0)) {
-            discoveredSpeakers[speakerCount].ip = ipv4;
-            Serial.printf("  Discovered IPv4 address from cache: %s\n", ipv4.toString().c_str());
+            ip = ipv4;
           } else {
             IPAddress addr = MDNS.addressV6(i);
             if (addr.type() == IPv6 && addr != IN6ADDR_ANY) {
               uint8_t ipBytes[16];
               for (int b = 0; b < 16; b++) ipBytes[b] = addr[b];
-              discoveredSpeakers[speakerCount].ip = IPAddress(IPv6, ipBytes, ETH.impl_index());
-              Serial.printf("  Discovered IPv6 address from cache: %s (zone: %d)\n", 
-                discoveredSpeakers[speakerCount].ip.toString().c_str(), ETH.impl_index());
+              ip = IPAddress(IPv6, ipBytes, ETH.impl_index());
             } else {
               String host = MDNS.hostname(i);
               if (host.length() > 0) {
-                Serial.printf("IP not in cache. Resolving IPv4 host: %s.local...\n", host.c_str());
-                IPAddress ip4 = MDNS.queryHost(host.c_str(), 2000);
+                IPAddress ip4 = MDNS.queryHost(host.c_str(), 1000);
                 if (ip4 != INADDR_NONE && ip4 != IPAddress(0,0,0,0)) {
-                  discoveredSpeakers[speakerCount].ip = ip4;
-                  Serial.printf("  Resolved IPv4: %s\n", ip4.toString().c_str());
+                  ip = ip4;
                 } else {
-                  Serial.printf("IPv4 resolution failed. Resolving IPv6 host: %s.local...\n", host.c_str());
-                  IPAddress ip6 = queryHostV6(host.c_str(), 2000);
+                  IPAddress ip6 = queryHostV6(host.c_str(), 1500);
                   if (ip6.type() == IPv6 && ip6 != IN6ADDR_ANY) {
-                    discoveredSpeakers[speakerCount].ip = ip6;
-                    Serial.printf("  Resolved IPv6: %s (zone: %d)\n", ip6.toString().c_str(), ETH.impl_index());
-                  } else {
-                    discoveredSpeakers[speakerCount].ip = IPAddress(0,0,0,0);
-                    Serial.println("  Failed to resolve both IPv4 and IPv6");
+                    ip = ip6;
                   }
                 }
-              } else {
-                discoveredSpeakers[speakerCount].ip = IPAddress(0,0,0,0);
               }
             }
           }
-          discoveredSpeakers[speakerCount].port = MDNS.port(i);
           
+          uint16_t port = MDNS.port(i);
           String hostStr = MDNS.hostname(i);
-          strncpy(discoveredSpeakers[speakerCount].hostname, hostStr.c_str(), sizeof(discoveredSpeakers[speakerCount].hostname) - 1);
-          discoveredSpeakers[speakerCount].hostname[sizeof(discoveredSpeakers[speakerCount].hostname) - 1] = '\0';
           
-          speakerCount++;
+          if ((ip.type() == IPv6 && ip == IN6ADDR_ANY) || (ip.type() == IPv4 && ip == IPAddress(0,0,0,0))) {
+            Serial.printf("  Skipping service record %d: unresolved IP.\n", i + 1);
+            continue;
+          }
           
-          Serial.printf("  Speaker %d: %s (%s:%d)\n", i+1, discoveredSpeakers[i].hostname, discoveredSpeakers[i].ip.toString().c_str(), discoveredSpeakers[i].port);
+          // Verify TCP connectivity to port 45
+          NetworkClient client;
+          Serial.printf("  Verifying connectivity to speaker %s (%s:%d)...\n", hostStr.c_str(), ip.toString().c_str(), port);
+          if (client.connect(ip, port, 500)) {
+            client.stop();
+            Serial.printf("  Speaker %s is ONLINE.\n", hostStr.c_str());
+            
+            activeSpeakers[activeCount].ip = ip;
+            activeSpeakers[activeCount].port = port;
+            strncpy(activeSpeakers[activeCount].hostname, hostStr.c_str(), sizeof(activeSpeakers[activeCount].hostname) - 1);
+            activeSpeakers[activeCount].hostname[sizeof(activeSpeakers[activeCount].hostname) - 1] = '\0';
+            activeCount++;
+          } else {
+            Serial.printf("  Speaker %s is OFFLINE (TCP connection failed).\n", hostStr.c_str());
+          }
         }
-        xSemaphoreGive(speakerMutex);
       } else {
         Serial.println("No speakers found during mDNS scan.");
-        xSemaphoreTake(speakerMutex, portMAX_DELAY);
-        speakerCount = 0;
-        xSemaphoreGive(speakerMutex);
       }
+      
+      // Update cache and perform synchronization/initialization logic
+      xSemaphoreTake(speakerMutex, portMAX_DELAY);
+      
+      // Check for newly discovered/connected speakers to sync volume
+      for (int i = 0; i < activeCount; i++) {
+        bool wasCached = false;
+        for (int j = 0; j < speakerCount; j++) {
+          if (strcmp(activeSpeakers[i].hostname, discoveredSpeakers[j].hostname) == 0) {
+            wasCached = true;
+            break;
+          }
+        }
+        
+        if (!wasCached) {
+          Serial.printf("New speaker connected: %s\n", activeSpeakers[i].hostname);
+          if (currentVolume > -999.0) {
+            Serial.printf("Syncing new speaker %s to current volume level %.1f dB...\n", activeSpeakers[i].hostname, currentVolume);
+            setSpeakerLevel(activeSpeakers[i], currentVolume);
+          }
+        }
+      }
+      
+      // Save active speakers to cache
+      speakerCount = activeCount;
+      for (int i = 0; i < activeCount; i++) {
+        discoveredSpeakers[i] = activeSpeakers[i];
+      }
+      
+      // If volume is uninitialized and we have speakers, fetch level to initialize
+      if (currentVolume < -999.0 && speakerCount > 0) {
+        Serial.println("Initializing system volume level from first discovered speaker...");
+        float val = getSpeakerLevel(discoveredSpeakers[0]);
+        if (val > -999.0) {
+          currentVolume = val;
+          Serial.printf("System volume level initialized to: %.1f dB\n", currentVolume);
+        } else {
+          Serial.println("Failed to read volume from speaker during initialization.");
+        }
+      }
+      
+      xSemaphoreGive(speakerMutex);
+      
     } else {
       Serial.println("Ethernet link down, skipping mDNS scan.");
       xSemaphoreTake(speakerMutex, portMAX_DELAY);
@@ -239,8 +286,8 @@ void mdnsDiscoveryTask(void *pvParameters) {
       xSemaphoreGive(speakerMutex);
     }
     
-    // Wait 15 seconds before scanning again
-    vTaskDelay(pdMS_TO_TICKS(15000));
+    // Wait 10 seconds before scanning again (faster scan to detect state changes quickly)
+    vTaskDelay(pdMS_TO_TICKS(10000));
   }
 }
 
@@ -267,6 +314,7 @@ void handleGetStatus() {
   
   // Discovered Speakers Count
   doc["speaker_count"] = speakerCount;
+  doc["current_volume"] = currentVolume;
   
   String response;
   serializeJson(doc, response);
@@ -315,6 +363,11 @@ void handleGetLevel() {
     return;
   }
 
+  // Update currentVolume on successful query
+  xSemaphoreTake(speakerMutex, portMAX_DELAY);
+  currentVolume = level;
+  xSemaphoreGive(speakerMutex);
+
   JsonDocument doc;
   doc["level"] = level;
   doc["unit"] = "dB";
@@ -359,6 +412,11 @@ void handleSetLevel() {
     level = MIN_LEVEL;
     clamped = true;
   }
+
+  // Update current volume
+  xSemaphoreTake(speakerMutex, portMAX_DELAY);
+  currentVolume = level;
+  xSemaphoreGive(speakerMutex);
 
   // Send level to all speakers
   bool success = true;
