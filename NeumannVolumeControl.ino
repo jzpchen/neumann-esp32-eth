@@ -2,6 +2,7 @@
 #include <ETH.h>
 #include <SPI.h>
 #include <ESPmDNS.h>
+#include "mdns.h"
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <WiFiUdp.h>
@@ -25,6 +26,7 @@
 struct SpeakerInfo {
   IPAddress ip;
   uint16_t port;
+  char hostname[64];
 };
 
 // Speaker lists and mutex
@@ -42,6 +44,7 @@ void handleGetSpeakers();
 void handleGetLevel();
 void handleSetLevel();
 void handleRoot();
+void handleGetStatus();
 void mdnsDiscoveryTask(void *pvParameters);
 void onNetworkEvent(arduino_event_id_t event);
 float getSpeakerLevel(const SpeakerInfo &speaker);
@@ -70,23 +73,19 @@ void setup() {
   ethSPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CS_PIN);
 
   Serial.println("Starting Ethernet...");
-  // Set W5500 interface configuration (static IP for IPv4 link-local)
-  IPAddress local_ip(169, 254, 1, 1);
-  IPAddress subnet(255, 255, 0, 0);
-  IPAddress gateway(0, 0, 0, 0);
-  
-  // Set Ethernet static IP
-  ETH.config(local_ip, gateway, subnet);
-  
   if (!ETH.begin(ETH_PHY_W5500, 1, CS_PIN, IRQ_PIN, RST_PIN, ethSPI)) {
     Serial.println("W5500 Ethernet begin failed!");
   } else {
     Serial.println("W5500 Ethernet interface initialized.");
+    IPAddress local_ip(169, 254, 1, 1);
+    IPAddress subnet(255, 255, 0, 0);
+    IPAddress gateway(0, 0, 0, 0);
+    ETH.config(local_ip, gateway, subnet);
     ETH.enableIPv6(true);
   }
 
-  // Start UDP listener
-  udp.begin(LOCAL_UDP_PORT);
+  // Start UDP listener using IPv6 wildcard to ensure the socket supports IPv6
+  udp.begin(IPAddress(IPv6), LOCAL_UDP_PORT);
   Serial.print("UDP listening on local port ");
   Serial.println(LOCAL_UDP_PORT);
 
@@ -94,6 +93,7 @@ void setup() {
   server.on("/api/speakers", HTTP_GET, handleGetSpeakers);
   server.on("/api/level", HTTP_GET, handleGetLevel);
   server.on("/api/level", HTTP_POST, handleSetLevel);
+  server.on("/api/status", HTTP_GET, handleGetStatus);
   server.on("/", HTTP_GET, handleRoot);
   
   server.begin();
@@ -155,6 +155,18 @@ void onNetworkEvent(arduino_event_id_t event) {
   }
 }
 
+// Helper to query mDNS AAAA record (IPv6 address) for a hostname
+IPAddress queryHostV6(const char *host, uint32_t timeout = 2000) {
+  esp_ip6_addr_t addr;
+  memset(&addr, 0, sizeof(addr));
+  esp_err_t err = mdns_query_aaaa(host, timeout, &addr);
+  if (err) {
+    Serial.printf("mdns_query_aaaa failed for host %s (error: 0x%x)\n", host, err);
+    return IPAddress(IPv6); // Return empty IPv6 address
+  }
+  return IPAddress(IPv6, (const uint8_t *)addr.addr, ETH.impl_index());
+}
+
 // Background FreeRTOS task for scanning speakers
 void mdnsDiscoveryTask(void *pvParameters) {
   while (true) {
@@ -167,16 +179,51 @@ void mdnsDiscoveryTask(void *pvParameters) {
         xSemaphoreTake(speakerMutex, portMAX_DELAY);
         speakerCount = 0;
         for (int i = 0; i < n && i < 10; i++) {
-          IPAddress addr = MDNS.addressV6(i);
-          if (addr.type() == IPv6) {
-            discoveredSpeakers[speakerCount].ip = addr;
+          IPAddress ipv4 = MDNS.address(i);
+          if (ipv4 != INADDR_NONE && ipv4 != IPAddress(0,0,0,0)) {
+            discoveredSpeakers[speakerCount].ip = ipv4;
+            Serial.printf("  Discovered IPv4 address from cache: %s\n", ipv4.toString().c_str());
           } else {
-            discoveredSpeakers[speakerCount].ip = MDNS.address(i);
+            IPAddress addr = MDNS.addressV6(i);
+            if (addr.type() == IPv6 && addr != IN6ADDR_ANY) {
+              uint8_t ipBytes[16];
+              for (int b = 0; b < 16; b++) ipBytes[b] = addr[b];
+              discoveredSpeakers[speakerCount].ip = IPAddress(IPv6, ipBytes, ETH.impl_index());
+              Serial.printf("  Discovered IPv6 address from cache: %s (zone: %d)\n", 
+                discoveredSpeakers[speakerCount].ip.toString().c_str(), ETH.impl_index());
+            } else {
+              String host = MDNS.hostname(i);
+              if (host.length() > 0) {
+                Serial.printf("IP not in cache. Resolving IPv4 host: %s.local...\n", host.c_str());
+                IPAddress ip4 = MDNS.queryHost(host.c_str(), 2000);
+                if (ip4 != INADDR_NONE && ip4 != IPAddress(0,0,0,0)) {
+                  discoveredSpeakers[speakerCount].ip = ip4;
+                  Serial.printf("  Resolved IPv4: %s\n", ip4.toString().c_str());
+                } else {
+                  Serial.printf("IPv4 resolution failed. Resolving IPv6 host: %s.local...\n", host.c_str());
+                  IPAddress ip6 = queryHostV6(host.c_str(), 2000);
+                  if (ip6.type() == IPv6 && ip6 != IN6ADDR_ANY) {
+                    discoveredSpeakers[speakerCount].ip = ip6;
+                    Serial.printf("  Resolved IPv6: %s (zone: %d)\n", ip6.toString().c_str(), ETH.impl_index());
+                  } else {
+                    discoveredSpeakers[speakerCount].ip = IPAddress(0,0,0,0);
+                    Serial.println("  Failed to resolve both IPv4 and IPv6");
+                  }
+                }
+              } else {
+                discoveredSpeakers[speakerCount].ip = IPAddress(0,0,0,0);
+              }
+            }
           }
           discoveredSpeakers[speakerCount].port = MDNS.port(i);
+          
+          String hostStr = MDNS.hostname(i);
+          strncpy(discoveredSpeakers[speakerCount].hostname, hostStr.c_str(), sizeof(discoveredSpeakers[speakerCount].hostname) - 1);
+          discoveredSpeakers[speakerCount].hostname[sizeof(discoveredSpeakers[speakerCount].hostname) - 1] = '\0';
+          
           speakerCount++;
           
-          Serial.printf("  Speaker %d: %s:%d\n", i+1, discoveredSpeakers[i-1+1].ip.toString().c_str(), discoveredSpeakers[i-1+1].port);
+          Serial.printf("  Speaker %d: %s (%s:%d)\n", i+1, discoveredSpeakers[i].hostname, discoveredSpeakers[i].ip.toString().c_str(), discoveredSpeakers[i].port);
         }
         xSemaphoreGive(speakerMutex);
       } else {
@@ -197,6 +244,35 @@ void mdnsDiscoveryTask(void *pvParameters) {
   }
 }
 
+void handleGetStatus() {
+  JsonDocument doc;
+  
+  // Wi-Fi Status
+  JsonObject wifi = doc.createNestedObject("wifi");
+  wifi["connected"] = (WiFi.status() == WL_CONNECTED);
+  wifi["ip"] = WiFi.localIP().toString();
+  wifi["ip6"] = WiFi.linkLocalIPv6().toString();
+  
+  // Ethernet Status
+  JsonObject eth = doc.createNestedObject("eth");
+  eth["connected"] = ETH.connected();
+  eth["link_up"] = ETH.linkUp();
+  eth["ip"] = ETH.localIP().toString();
+  eth["ip6"] = ETH.linkLocalIPv6().toString();
+  eth["speed"] = ETH.linkSpeed();
+  eth["full_duplex"] = ETH.fullDuplex();
+  
+  // MDNS Status
+  doc["mdns_hostname"] = "neumann-vol.local";
+  
+  // Discovered Speakers Count
+  doc["speaker_count"] = speakerCount;
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
 void handleGetSpeakers() {
   JsonDocument doc;
   JsonArray arr = doc.createNestedArray("speakers");
@@ -204,7 +280,11 @@ void handleGetSpeakers() {
   xSemaphoreTake(speakerMutex, portMAX_DELAY);
   for (int i = 0; i < speakerCount; i++) {
     JsonObject obj = arr.createNestedObject();
-    obj["hostname"] = nullptr;
+    if (strlen(discoveredSpeakers[i].hostname) > 0) {
+      obj["hostname"] = discoveredSpeakers[i].hostname;
+    } else {
+      obj["hostname"] = nullptr;
+    }
     obj["ip"] = discoveredSpeakers[i].ip.toString();
     obj["port"] = discoveredSpeakers[i].port;
   }
@@ -307,97 +387,106 @@ void handleSetLevel() {
   server.send(200, "application/json", response);
 }
 
-// Low-level UDP communication function to read level
+// Low-level TCP communication function to read level
 float getSpeakerLevel(const SpeakerInfo &speaker) {
-  // Clear any incoming packets first
-  udp.clear();
-
-  // Construct request JSON
-  String request = "{\"audio\": {\"out\": {\"level\": null}}}";
+  NetworkClient client;
   
-  Serial.printf("Querying volume from speaker %s:%d...\n", speaker.ip.toString().c_str(), speaker.port);
+  Serial.printf("Connecting to speaker via TCP %s:%d...\n", speaker.ip.toString().c_str(), speaker.port);
   
-  udp.beginPacket(speaker.ip, speaker.port);
-  udp.write((const uint8_t*)request.c_str(), request.length());
-  if (udp.endPacket() == 0) {
-    Serial.println("UDP begin/end packet failed.");
+  if (!client.connect(speaker.ip, speaker.port, 1000)) {
+    Serial.println("TCP connection to speaker failed.");
     return -1000.0;
   }
-
+  
+  // Construct request JSON without spaces
+  String request = "{\"audio\":{\"out\":{\"level\":null}}}";
+  
+  client.println(request);
+  
   // Await response
   unsigned long start = millis();
-  char buffer[512];
-  int len = 0;
-  while (millis() - start < 400) { // 400ms timeout
-    int packetSize = udp.parsePacket();
-    if (packetSize > 0) {
-      len = udp.read(buffer, sizeof(buffer) - 1);
-      if (len > 0) {
-        buffer[len] = '\0';
-        break;
+  String response = "";
+  while (client.connected() && millis() - start < 1000) {
+    while (client.available()) {
+      char c = client.read();
+      response += c;
+    }
+    // If we have a non-empty response, check if we received the closing brace
+    if (response.length() > 0 && response.indexOf('}') != -1) {
+      delay(10); // small delay to ensure buffer is completely flushed
+      while (client.available()) {
+        response += (char)client.read();
       }
+      break;
     }
     delay(10);
   }
-
-  if (len == 0) {
-    Serial.println("Timeout waiting for level query response from speaker.");
+  
+  client.stop();
+  
+  if (response.length() == 0) {
+    Serial.println("Timeout waiting for level query TCP response from speaker.");
     return -1000.0;
   }
-
-  Serial.printf("Speaker query response: %s\n", buffer);
-
+  
+  Serial.printf("Speaker TCP response: %s\n", response.c_str());
+  
   // Parse JSON response
   JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, buffer);
+  DeserializationError err = deserializeJson(doc, response);
   if (err) {
-    Serial.println("Failed to parse speaker JSON response.");
+    Serial.printf("Failed to parse speaker JSON response: %s\n", err.c_str());
     return -1000.0;
   }
-
+  
   if (doc.containsKey("audio") && 
       doc["audio"].containsKey("out") && 
       doc["audio"]["out"].containsKey("level")) {
     return doc["audio"]["out"]["level"].as<float>();
   }
-
+  
   Serial.println("JSON response does not contain level key.");
   return -1000.0;
 }
 
-// Low-level UDP communication function to write level
+// Low-level TCP communication function to write level
 bool setSpeakerLevel(const SpeakerInfo &speaker, float level) {
-  // Clear incoming packets
-  udp.clear();
-
+  NetworkClient client;
+  
+  Serial.printf("Connecting to speaker via TCP %s:%d to set volume...\n", speaker.ip.toString().c_str(), speaker.port);
+  
+  if (!client.connect(speaker.ip, speaker.port, 1000)) {
+    Serial.println("TCP connection to speaker failed.");
+    return false;
+  }
+  
   // Construct command JSON
   char request[128];
   snprintf(request, sizeof(request), "{\"audio\":{\"out\":{\"level\":%.1f}}}", level);
   
-  Serial.printf("Setting volume on speaker %s:%d to %.1f dB...\n", speaker.ip.toString().c_str(), speaker.port, level);
-
-  udp.beginPacket(speaker.ip, speaker.port);
-  udp.write((const uint8_t*)request, strlen(request));
-  if (udp.endPacket() == 0) {
-    Serial.println("UDP send packet failed.");
-    return false;
-  }
+  client.println(request);
   
-  // Wait up to 100ms for reply, but we won't fail the set command if we don't receive it.
+  // Await response (ack)
   unsigned long start = millis();
-  while (millis() - start < 100) {
-    if (udp.parsePacket() > 0) {
-      char buf[256];
-      int n = udp.read(buf, sizeof(buf) - 1);
-      if (n > 0) {
-        buf[n] = '\0';
-        Serial.printf("Speaker set response ack: %s\n", buf);
-      }
+  String response = "";
+  while (client.connected() && millis() - start < 500) {
+    while (client.available()) {
+      response += (char)client.read();
+    }
+    if (response.length() > 0 && response.indexOf('}') != -1) {
       break;
     }
-    delay(5);
+    delay(10);
   }
-
+  
+  client.stop();
+  
+  if (response.length() > 0) {
+    Serial.printf("Speaker set TCP response: %s\n", response.c_str());
+  } else {
+    Serial.println("No response received for set level command, but assuming success.");
+  }
+  
   return true;
 }
 

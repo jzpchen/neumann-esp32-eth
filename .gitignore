@@ -4,3 +4,5 @@ credentials.h
 # Ignore compilation builds (if any are saved locally)
 build/
 out/
+serial.log
+
