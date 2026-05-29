@@ -420,7 +420,14 @@ void handleGetLevel() {
   xSemaphoreGive(speakerMutex);
 
   if (count == 0 || level < -999.0) {
-    server.send(503, "application/json", "{\"error\":\"speakers not connected\"}");
+    JsonDocument doc;
+    doc["error"] = "speakers not connected";
+    if (level >= -999.0) {
+      doc["level"] = level;
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(503, "application/json", response);
     return;
   }
 

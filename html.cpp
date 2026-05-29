@@ -60,6 +60,8 @@ const char HTML_CONTENT[] = R"rawliteral(
         header {
             text-align: center;
             margin-bottom: 32px;
+            position: relative;
+            z-index: 11;
         }
         
         h1 {
@@ -83,6 +85,8 @@ const char HTML_CONTENT[] = R"rawliteral(
         .volume-display {
             text-align: center;
             margin-bottom: 24px;
+            position: relative;
+            z-index: 11;
         }
         
         .volume-value {
@@ -236,12 +240,13 @@ const char HTML_CONTENT[] = R"rawliteral(
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-end;
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.4s ease;
             z-index: 10;
             padding: 32px;
+            padding-bottom: 60px;
             text-align: center;
         }
         
@@ -467,6 +472,17 @@ const char HTML_CONTENT[] = R"rawliteral(
                 if (lvlRes.status === 503) {
                     showOverlay("offline", "Monitors Offline", "Ensure Neumann monitors are powered on and connected to the Ethernet port.");
                     updateSpeakerUI(spData.speakers || []);
+                    try {
+                        const lvlData = await lvlRes.json();
+                        if (lvlData.level !== undefined && lvlData.level !== null) {
+                            volVal.innerText = lvlData.level.toFixed(1);
+                            volSlider.value = lvlData.level;
+                        } else {
+                            volVal.innerText = "--.-";
+                        }
+                    } catch (e) {
+                        volVal.innerText = "--.-";
+                    }
                     setNextPoll(1000); // Poll faster (1s) when offline
                     return;
                 }
