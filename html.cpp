@@ -340,6 +340,9 @@ const char HTML_CONTENT[] = R"rawliteral(
             <ul class="speaker-list" id="speakerList">
                 <li style="text-align: center; padding: 10px 0;">No discovered speakers</li>
             </ul>
+            <div style="margin-top: 12px; text-align: center;">
+                <button class="btn-preset" id="btnSwap" style="width: 100%; margin-bottom: 0;">Swap L/R Monitors</button>
+            </div>
         </div>
     </div>
 
@@ -379,16 +382,24 @@ const char HTML_CONTENT[] = R"rawliteral(
             volSlider.disabled = false;
         }
 
-        function updateSpeakerUI(speakers) {
+        function updateSpeakerUI(speakers, swapLR) {
             if (speakers.length > 0) {
                 statusDot.className = 'status-dot online';
                 statusText.innerText = `CONNECTED (${speakers.length})`;
-                speakerList.innerHTML = speakers.map((s, idx) => `
-                    <li class="speaker-item">
-                        <span>Monitor ${idx + 1}</span>
-                        <span>${s.ip}</span>
-                    </li>
-                `).join('');
+                speakerList.innerHTML = speakers.map((s, idx) => {
+                    let label = `Monitor ${idx + 1}`;
+                    if (idx === 0) {
+                        label += swapLR ? ' (Right)' : ' (Left)';
+                    } else if (idx === 1) {
+                        label += swapLR ? ' (Left)' : ' (Right)';
+                    }
+                    return `
+                        <li class="speaker-item">
+                            <span>${label}</span>
+                            <span>${s.ip}</span>
+                        </li>
+                    `;
+                }).join('');
             } else {
                 statusDot.className = 'status-dot';
                 statusText.innerText = "OFFLINE";
@@ -453,9 +464,35 @@ const char HTML_CONTENT[] = R"rawliteral(
 
         // Attach preset button listeners
         document.querySelectorAll('.btn-preset').forEach(btn => {
-            btn.addEventListener('click', () => {
-                setVolumePreset(parseFloat(btn.dataset.preset));
-            });
+            if (btn.id !== 'btnSwap') {
+                btn.addEventListener('click', () => {
+                    setVolumePreset(parseFloat(btn.dataset.preset));
+                });
+            }
+        });
+
+        // Swap Left/Right monitors
+        const btnSwap = document.getElementById('btnSwap');
+        let currentSwapLR = false;
+
+        btnSwap.addEventListener('click', async () => {
+            try {
+                btnSwap.disabled = true;
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ swap_lr: !currentSwapLR })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    currentSwapLR = data.swap_lr;
+                    fetchState();
+                }
+            } catch (err) {
+                console.error("Error swapping L/R:", err);
+            } finally {
+                btnSwap.disabled = false;
+            }
         });
 
         let pollTimer = null;
@@ -465,13 +502,14 @@ const char HTML_CONTENT[] = R"rawliteral(
                 // Fetch speakers list
                 const spRes = await fetch('/api/speakers');
                 const spData = await spRes.json();
+                currentSwapLR = spData.swap_lr || false;
                 
                 // Fetch current volume level
                 const lvlRes = await fetch('/api/level');
                 
                 if (lvlRes.status === 503) {
                     showOverlay("offline", "Monitors Offline", "Ensure Neumann monitors are powered on and connected to the Ethernet port.");
-                    updateSpeakerUI(spData.speakers || []);
+                    updateSpeakerUI(spData.speakers || [], currentSwapLR);
                     try {
                         const lvlData = await lvlRes.json();
                         if (lvlData.level !== undefined && lvlData.level !== null) {
@@ -492,7 +530,7 @@ const char HTML_CONTENT[] = R"rawliteral(
                 const lvlData = await lvlRes.json();
                 
                 hideOverlay();
-                updateSpeakerUI(spData.speakers || []);
+                updateSpeakerUI(spData.speakers || [], currentSwapLR);
                 
                 if (!isDragging && isQuiet()) {
                     volVal.innerText = lvlData.level.toFixed(1);
