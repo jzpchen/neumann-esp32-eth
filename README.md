@@ -15,6 +15,14 @@ A lightweight, high-performance network volume controller and REST API server ru
   * **INT (IRQ)**: GPIO 10
   * **RST**: GPIO 9
   * **PHY Address**: `1`
+* **OLED Display (I2C SSD1306/SSD1315)**:
+  * **SDA**: GPIO 17 (Pin 34)
+  * **SCL**: GPIO 18 (Pin 31)
+* **Rotary Encoder (EC11)**:
+  * **TR_A**: GPIO 1 (Pin 25)
+  * **TR_B**: GPIO 2 (Pin 26)
+  * **PUSH**: GPIO 3 (Pin 27)
+  * *Note*: Direction is reversed in software (TR_B and TR_A swapped) to ensure clockwise rotation increases volume.
 
 ---
 

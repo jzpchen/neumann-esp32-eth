@@ -94,8 +94,6 @@ void updateOLED() {
   
   xSemaphoreTake(speakerMutex, portMAX_DELAY);
   float vol = currentVolume;
-  int activeCount = speakerCount;
-  int historyCount = knownSpeakerCount;
   
   // Speaker identification logic based on hostname keyword or order of appearance
   int leftIdx = -1;
@@ -525,7 +523,7 @@ void mdnsDiscoveryTask(void *pvParameters) {
             if (client.connect(knownSpeakers[i].ip, knownSpeakers[i].port, 300)) { // Fast 300ms timeout
               client.stop();
               Serial.printf("[%lu ms] Direct reconnect success for missing speaker: %s (%s, took %lu ms)\n", 
-                millis(), knownSpeakers[i].hostname, knownSpeakers[i].ip.toString().c_str(), startTCP);
+                millis(), knownSpeakers[i].hostname, knownSpeakers[i].ip.toString().c_str(), millis() - startTCP);
               activeSpeakers[activeCount] = knownSpeakers[i];
               activeCount++;
             }
@@ -722,8 +720,7 @@ void handleSetLevel() {
     return;
   }
 
-  float requestedLevel = reqDoc["level"].as<float>();
-  float level = requestedLevel;
+  float level = reqDoc["level"].as<float>();
   
   // Clamp level
   bool clamped = false;
