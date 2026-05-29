@@ -145,3 +145,14 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 .
 # Flash sketch (replace cu.usbmodem* with your port)
 arduino-cli upload -p /dev/cu.usbmodem21101 --fqbn esp32:esp32:esp32s3 .
 ```
+
+---
+
+## Technical & Architecture Notes
+
+### Arduino Preprocessor / Raw String Literal Workaround
+* **The Issue**: The standard Arduino preprocessor scans `.ino` files to auto-generate C++ prototypes. If you embed HTML/JavaScript inside a C++ raw string literal (`R"rawliteral(...)rawliteral"`) in a `.ino` file, and that JS contains parenthesis adjacent to double-quotes (such as inline click handlers: `onclick="foo(30)"`), the preprocessor incorrectly interprets `)"` as the premature closing delimiter of the C++ string. It then tries to compile the remaining JS as C++ code, failing with confusing syntax errors (e.g., `error: 'asyncfunction' does not name a type`).
+* **The Solution**: 
+  1. All HTML/CSS/JavaScript content is declared externally in `html.h` and defined inside a separate `html.cpp` file. The Arduino preprocessor does not scan `.cpp`/`.h` files, which completely avoids the bug.
+  2. All inline JS click handlers containing parenthesis have been replaced by standard `data-preset` HTML attributes, and event listeners are attached dynamically in the JS script block at the bottom of the Web UI page.
+
