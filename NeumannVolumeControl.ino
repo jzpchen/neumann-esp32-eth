@@ -259,7 +259,7 @@ void setup() {
   Serial.println("REST API WebServer started on port 5000");
 
   // Initialize I2C and OLED
-  Wire.begin(17, 21); // Pin 34 (SDA = 17), Pin 35 (SCL = 21)
+  Wire.begin(17, 16); // Pin 34 (SDA = 17), Pin 32 (SCL = 16)
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
   } else {
