@@ -11,6 +11,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
+#include <ESP32Encoder.h>
 
 #define SCK_PIN 13
 #define MISO_PIN 12
@@ -53,7 +54,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define ENCODER_TR_B  2
 #define ENCODER_PUSH  3
 
-volatile int encoderTicks = 0;
+ESP32Encoder encoder;
 volatile bool pushPressed = false;
 volatile unsigned long lastPushTime = 0;
 volatile bool displayPowerState = true;
@@ -72,26 +73,10 @@ void mdnsDiscoveryTask(void *pvParameters);
 void onNetworkEvent(arduino_event_id_t event);
 float getSpeakerLevel(const SpeakerInfo &speaker);
 bool setSpeakerLevel(const SpeakerInfo &speaker, float level);
-void IRAM_ATTR encoderISR();
 void IRAM_ATTR pushISR();
 void updateOLED();
 void handlePostSettings();
 void turnOffRGB();
-
-void IRAM_ATTR encoderISR() {
-  static unsigned long lastInterruptTime = 0;
-  unsigned long interruptTime = micros();
-  if (interruptTime - lastInterruptTime > 15000) { // 15ms debounce
-    if (digitalRead(ENCODER_TR_A) == HIGH) {
-      if (digitalRead(ENCODER_TR_B) == LOW) {
-        encoderTicks++;
-      } else {
-        encoderTicks--;
-      }
-    }
-    lastInterruptTime = interruptTime;
-  }
-}
 
 void IRAM_ATTR pushISR() {
   unsigned long now = millis();
@@ -283,13 +268,14 @@ void setup() {
     Serial.println("OLED Display initialized.");
   }
 
-  // Initialize Rotary Encoder and Button pins
-  pinMode(ENCODER_TR_A, INPUT_PULLUP);
-  pinMode(ENCODER_TR_B, INPUT_PULLUP);
-  pinMode(ENCODER_PUSH, INPUT_PULLUP);
+  // Initialize ESP32Encoder
+  ESP32Encoder::useInternalWeakPullResistors = puType::up;
+  encoder.attachFullQuad(ENCODER_TR_B, ENCODER_TR_A);
+  encoder.setFilter(1023); // Hardware debounce filter
+  encoder.setCount(0);
 
-  // Attach interrupts
-  attachInterrupt(digitalPinToInterrupt(ENCODER_TR_A), encoderISR, RISING);
+  // Initialize Push Button pin and interrupt
+  pinMode(ENCODER_PUSH, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ENCODER_PUSH), pushISR, FALLING);
 
   // Start background mDNS Discovery Task
@@ -324,39 +310,47 @@ void loop() {
   }
 
   // Handle encoder rotation
-  if (encoderTicks != 0) {
-    noInterrupts();
-    int ticks = encoderTicks;
-    encoderTicks = 0;
-    interrupts();
+  static int64_t lastEncoderCount = 0;
+  int64_t currentEncoderCount = encoder.getCount();
+  int64_t encoderDelta = currentEncoderCount - lastEncoderCount;
+  if (encoderDelta != 0) {
+    lastEncoderCount = currentEncoderCount;
+    static int64_t encoderAccumulator = 0;
+    encoderAccumulator += encoderDelta;
+    
+    // 4 counts per click for standard EC11 in FullQuad mode
+    int64_t clicks = encoderAccumulator / 4;
+    if (clicks != 0) {
+      encoderAccumulator -= clicks * 4;
 
-    xSemaphoreTake(speakerMutex, portMAX_DELAY);
-    float val = currentVolume;
-    int count = speakerCount;
-    SpeakerInfo speakers[10];
-    for (int i = 0; i < count; i++) {
-      speakers[i] = discoveredSpeakers[i];
-    }
-    xSemaphoreGive(speakerMutex);
+      xSemaphoreTake(speakerMutex, portMAX_DELAY);
+      float val = currentVolume;
+      int count = speakerCount;
+      SpeakerInfo speakers[10];
+      for (int i = 0; i < count; i++) {
+        speakers[i] = discoveredSpeakers[i];
+      }
+      xSemaphoreGive(speakerMutex);
 
-    if (val >= -999.0) { // Only adjust if volume is initialized
-      float newVal = val + (ticks * 0.5); // Adjust by 0.5 dB steps
-      if (newVal > MAX_LEVEL) newVal = MAX_LEVEL;
-      if (newVal < MIN_LEVEL) newVal = MIN_LEVEL;
+      if (val >= -999.0) { // Only adjust if volume is initialized
+        float newVal = val + (clicks * 0.5); // Adjust by 0.5 dB steps
+        if (newVal > MAX_LEVEL) newVal = MAX_LEVEL;
+        if (newVal < MIN_LEVEL) newVal = MIN_LEVEL;
 
-      if (newVal != val) {
-        Serial.printf("Encoder adjusted volume: %.1f dB -> %.1f dB\n", val, newVal);
-        
-        xSemaphoreTake(speakerMutex, portMAX_DELAY);
-        currentVolume = newVal;
-        xSemaphoreGive(speakerMutex);
+        if (newVal != val) {
+          Serial.printf("Encoder adjusted volume: %.1f dB -> %.1f dB (delta=%lld, clicks=%lld)\n", val, newVal, encoderDelta, clicks);
+          
+          xSemaphoreTake(speakerMutex, portMAX_DELAY);
+          currentVolume = newVal;
+          xSemaphoreGive(speakerMutex);
 
-        // Update all active speakers
-        for (int i = 0; i < count; i++) {
-          setSpeakerLevel(speakers[i], newVal);
+          // Update all active speakers
+          for (int i = 0; i < count; i++) {
+            setSpeakerLevel(speakers[i], newVal);
+          }
+          
+          displayNeedsUpdate = true;
         }
-        
-        displayNeedsUpdate = true;
       }
     }
   }
@@ -880,21 +874,13 @@ void handleRoot() {
 }
 
 void turnOffRGB() {
-  const int RGB_PIN = 48; // WS2812 RGB LED data pin on Waveshare board
-  pinMode(RGB_PIN, OUTPUT);
-  digitalWrite(RGB_PIN, LOW);
-  delayMicroseconds(50); // Reset pulse for WS2812
-  
-  // Bitbang 24 bits of 0 (GRB order) to turn off the RGB LED
-  for (int i = 0; i < 24; i++) {
-    // Send a 0 bit: HIGH for ~350ns, LOW for ~800ns
-    digitalWrite(RGB_PIN, HIGH);
-    __asm__("nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;");
-    digitalWrite(RGB_PIN, LOW);
-    __asm__("nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;");
-  }
-  delayMicroseconds(50); // Latch pulse
-  Serial.println("Onboard RGB LED set to OFF.");
+#ifdef RGB_BUILTIN
+  neopixelWrite(RGB_BUILTIN, 0, 0, 0);
+#endif
+  neopixelWrite(21, 0, 0, 0);
+  neopixelWrite(38, 0, 0, 0);
+  neopixelWrite(48, 0, 0, 0);
+  Serial.println("Onboard RGB LED set to OFF via neopixelWrite.");
 }
 
 void handlePostSettings() {
