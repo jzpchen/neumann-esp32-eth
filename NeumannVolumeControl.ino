@@ -158,15 +158,15 @@ void updateOLED() {
     display.printf("%.1f", vol);
   }
 
-  // Draw "dB" unit (double size)
-  display.setTextSize(2);
-  display.setCursor(100, 14);
+  // Draw "dB" unit
+  display.setTextSize(1);
+  display.setCursor(100, 20);
   display.print("dB");
 
   // 2. Draw Bottom Status Bar (Speaker Icons)
-  // Left Speaker Icon (double size)
-  display.setTextSize(2);
-  display.setCursor(4, 44);
+  // Left Speaker Icon
+  display.setTextSize(1);
+  display.setCursor(12, 48);
   display.print("L");
   
   display.drawRoundRect(24, 40, 14, 22, 2, SSD1306_WHITE);
@@ -175,9 +175,11 @@ void updateOLED() {
   if (!leftOnline) {
     display.drawLine(24, 40, 37, 61, SSD1306_WHITE);
   } else {
-    // Sound waves (double size "<")
-    display.drawLine(22, 47, 18, 51, SSD1306_WHITE);
-    display.drawLine(18, 51, 22, 55, SSD1306_WHITE);
+    // Sound waves
+    display.drawPixel(21, 49, SSD1306_WHITE);
+    display.drawPixel(20, 50, SSD1306_WHITE);
+    display.drawPixel(20, 51, SSD1306_WHITE);
+    display.drawPixel(21, 52, SSD1306_WHITE);
   }
 
   // Right Speaker Icon
@@ -187,14 +189,14 @@ void updateOLED() {
   if (!rightOnline) {
     display.drawLine(90, 40, 103, 61, SSD1306_WHITE);
   } else {
-    // Sound waves (double size ">")
-    display.drawLine(105, 47, 109, 51, SSD1306_WHITE);
-    display.drawLine(109, 51, 105, 55, SSD1306_WHITE);
+    // Sound waves
+    display.drawPixel(106, 49, SSD1306_WHITE);
+    display.drawPixel(107, 50, SSD1306_WHITE);
+    display.drawPixel(107, 51, SSD1306_WHITE);
+    display.drawPixel(106, 52, SSD1306_WHITE);
   }
 
-  // Right Speaker Icon (double size)
-  display.setTextSize(2);
-  display.setCursor(112, 44);
+  display.setCursor(110, 48);
   display.print("R");
 
   display.display();
